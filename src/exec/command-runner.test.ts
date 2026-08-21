@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -59,6 +59,30 @@ describe("command-runner", () => {
       const byId = Object.fromEntries(commands.map((c) => [c.commandId, c]));
 
       expect(byId["npm:check"]).toMatchObject({ riskTier: "network" });
+    });
+
+    it("discovers safe Gradle Wrapper verification tasks", async () => {
+      await writeFile(join(root, "settings.gradle"), "rootProject.name = 'fixture'\n");
+      await writeFile(join(root, "gradlew"), "#!/bin/sh\n");
+      await writeFile(join(root, "gradlew.bat"), "@echo off\r\n");
+
+      const commands = await listCommands(root);
+      const byId = Object.fromEntries(commands.map((c) => [c.commandId, c]));
+
+      expect(byId["gradle:test"]).toMatchObject({ source: "Gradle Wrapper", riskTier: "verify" });
+      expect(byId["gradle:check"]).toMatchObject({ riskTier: "verify" });
+      expect(byId["gradle:build"]).toMatchObject({ riskTier: "verify" });
+      expect(byId["gradle:classes"]).toMatchObject({ riskTier: "verify" });
+      expect(byId["gradle:compileJava"]).toMatchObject({ riskTier: "verify" });
+      expect(byId["gradle:clean"]).toBeUndefined();
+    });
+
+    it("does not expose Gradle commands without a Gradle project marker", async () => {
+      await writeFile(join(root, "gradlew"), "#!/bin/sh\n");
+      await writeFile(join(root, "gradlew.bat"), "@echo off\r\n");
+
+      const commands = await listCommands(root);
+      expect(commands.some((command) => command.commandId.startsWith("gradle:"))).toBe(false);
     });
 
     it("discovers Makefile targets", async () => {
@@ -147,6 +171,22 @@ describe("command-runner", () => {
       expect(result.stdoutSummary).toContain("hello-from-test");
       expect(result.outputTruncated).toBe(false);
       expect(typeof result.durationMs).toBe("number");
+    });
+
+    it("runs a discovered Gradle Wrapper task on the current platform", async () => {
+      await writeFile(join(root, "settings.gradle"), "rootProject.name = 'fixture'\n");
+
+      if (process.platform === "win32") {
+        await writeFile(join(root, "gradlew.bat"), "@echo off\r\necho gradle-wrapper-ran %*\r\n");
+      } else {
+        const wrapper = join(root, "gradlew");
+        await writeFile(wrapper, "#!/bin/sh\necho gradle-wrapper-ran \"$@\"\n");
+        await chmod(wrapper, 0o755);
+      }
+
+      const result = await runCommand(root, "gradle:test", [], 30);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdoutSummary).toContain("gradle-wrapper-ran test");
     });
 
     it("truncates output that exceeds the head+tail budget", async () => {

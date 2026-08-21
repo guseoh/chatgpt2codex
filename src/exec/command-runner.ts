@@ -106,6 +106,38 @@ function npmRunArgv(name: string): string[] {
   return [process.platform === "win32" ? "npm.cmd" : "npm", "run", name];
 }
 
+const GRADLE_VERIFY_TASKS = ["test", "check", "build", "classes", "compileJava"] as const;
+
+function hasGradleProjectMarker(root: string): boolean {
+  return ["settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts"].some((name) =>
+    existsSync(join(root, name)),
+  );
+}
+
+function resolveGradleWrapper(root: string): string | null {
+  const windowsWrapper = join(root, "gradlew.bat");
+  const unixWrapper = join(root, "gradlew");
+
+  if (process.platform === "win32" && existsSync(windowsWrapper)) return windowsWrapper;
+  if (existsSync(unixWrapper)) return unixWrapper;
+  if (existsSync(windowsWrapper)) return windowsWrapper;
+  return null;
+}
+
+async function discoverGradleCommands(root: string): Promise<DiscoveredCommand[]> {
+  if (!hasGradleProjectMarker(root)) return [];
+  const wrapper = resolveGradleWrapper(root);
+  if (!wrapper) return [];
+
+  return GRADLE_VERIFY_TASKS.map((task) => ({
+    commandId: `gradle:${task}`,
+    display: `Gradle Wrapper ${task}`,
+    source: "Gradle Wrapper",
+    riskTier: "verify",
+    argv: [wrapper, task],
+  }));
+}
+
 async function discoverMakefileCommands(root: string): Promise<DiscoveredCommand[]> {
   const makePath = join(root, "Makefile");
   if (!existsSync(makePath)) return [];
@@ -178,17 +210,19 @@ async function discoverPubspecCommands(root: string): Promise<DiscoveredCommand[
 }
 
 async function discoverAllCommands(root: string): Promise<DiscoveredCommand[]> {
-  const [pkg, make, pubspec] = await Promise.all([
+  const [pkg, gradle, make, pubspec] = await Promise.all([
     discoverPackageJsonCommands(root),
+    discoverGradleCommands(root),
     discoverMakefileCommands(root),
     discoverPubspecCommands(root),
   ]);
-  return [...pkg, ...make, ...pubspec];
+  return [...pkg, ...gradle, ...make, ...pubspec];
 }
 
 /**
  * Detect safe, allowlist-eligible commands from project manifests
- * (package.json scripts, Makefile, pubspec.yaml, etc.) (PRD §8.5 command_list).
+ * (package.json scripts, Gradle Wrapper, Makefile, pubspec.yaml, etc.)
+ * (PRD §8.5 command_list).
  */
 export async function listCommands(
   root: string,
@@ -212,7 +246,7 @@ function quoteCmdArg(value: string): string {
 }
 
 function buildExecFileInvocation(cmd: string, args: string[]): { file: string; args: string[] } {
-  if (process.platform === "win32" && /\.cmd$/i.test(cmd)) {
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd)) {
     const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
     return {
       file: comspec,
